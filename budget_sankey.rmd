@@ -1,0 +1,140 @@
+---
+title: "Budget Sankey Diagram"
+output: github_document
+---
+
+# Includes
+```{r}
+library(networkD3)
+library(jsonlite)
+library(rjson)
+library(tidyverse)
+library(readxl)
+options(dplyr.summarise.inform = FALSE)
+```
+
+
+# Load data
+```{r}
+data <- read_excel('sample_data.xlsx')
+total_value <- sum((data %>% filter(target == 'Income'))$value)
+data
+```
+
+# Collect list of unique nodes
+```{r}
+nodes <- tibble(name = data$source) %>%
+  bind_rows(tibble(name = data$target)) %>%
+  unique() %>%
+  mutate(id = 1:n() - 1) %>%
+  left_join(data %>% group_by(target, link_group) %>% summarise() %>% rename(name = target, node_group = link_group), by = join_by(name)) %>%
+  mutate(node_group = ifelse(is.na(node_group), 'income', node_group))
+nodes
+```
+
+
+# Define links between nodes
+```{r}
+links <- data %>%
+  inner_join(nodes %>% rename(source=name) %>% select(-node_group), by = join_by(source)) %>%
+  select(-source) %>%
+  rename(source = id) %>%
+  inner_join(nodes %>% rename(target=name) %>% select(-node_group), by = join_by(target)) %>%
+  select(-target) %>%
+  rename(target = id)
+links
+```
+
+
+# Create base chart
+```{r}
+# add a column that specifies alignment - this will be used by javascript later
+nodes <- nodes %>%
+  mutate(label_align = ifelse(node_group == 'income', 'left', 'right')) %>%
+  mutate(label_align = ifelse(node_group == tolower(name), 'center', label_align))
+
+# calculate percentages for label suffixes
+suffixes <- data %>%
+  group_by(source) %>%
+  summarise(value = sum(value)) %>%
+  rename(name = source) %>%
+  bind_rows(data %>%
+              group_by(target) %>%
+              summarise(value = sum(value)) %>%
+              rename(name = target)) %>%
+  group_by(name) %>% summarise(value = max(value)) %>%
+  mutate(suffix = paste0('(', round(100 * value / total_value, 1), '%)')) %>%
+  select(-value)
+
+# create chart object
+sankey <- sankeyNetwork(Links = as.data.frame(links), Nodes = as.data.frame(nodes), Source = 'source',
+              Target = 'target', Value = 'value', NodeID = 'name',
+              LinkGroup = 'link_group',
+              NodeGroup = 'node_group',
+              fontFamily = 'Arial',
+              fontSize = 12, nodeWidth = 60, nodePadding = 20,
+              sinksRight = TRUE,
+              margin = list(top=0, right=150, left=175, bottom=0),
+              height = 500, width=1000)
+sankey
+```
+
+
+
+# Render with custom formatting
+```{r}
+# add additional columns to chart data
+sankey$x$nodes$label_align <- nodes$label_align
+sankey$x$nodes <- sankey$x$nodes %>% mutate(align_left = ifelse(label_align == 'left', TRUE, FALSE))
+sankey$x$nodes <- sankey$x$nodes %>% mutate(align_center = ifelse(label_align == 'center', TRUE, FALSE))
+sankey$x$nodes <- sankey$x$nodes %>% mutate(align_right = ifelse(label_align == 'right', TRUE, FALSE))
+sankey$x$nodes <- sankey$x$nodes %>% left_join(suffixes, by = join_by(name))
+
+# render chart with custom javascript
+htmlwidgets::onRender(
+  sankey,
+  '
+  function(el,x) {
+
+  
+  d3.select(el)
+    .selectAll(".node text")
+    .filter(function(d) { return d.align_left; })
+    .attr("x", -10)
+    .attr("text-anchor", "end");
+    
+  d3.select(el)
+    .selectAll(".node text")
+    .filter(function(d) { return d.align_right; })
+    .attr("x", x.options.nodeWidth+ 5)
+    .attr("text-anchor", "start");
+  
+  d3.select(el)
+    .selectAll(".node text")
+    .filter(function(d) { return d.align_center; })
+    .attr("x", x.options.nodeWidth / 2)
+    .attr("text-anchor", "middle");
+
+  d3.select(el).selectAll(".node text").filter(function(d) { return d.align_center; }).each(function(d){
+    var arr, val, anc
+    arr = " " + d.suffix;
+    arr = arr.split(" ");
+    val = d3.select(this).attr("x");
+    anc = d3.select(this).attr("text-anchor"); 
+    for(i = 0; i < arr.length; i++) {
+      d3.select(this).append("tspan")
+          .text(arr[i])
+          .attr("dy", i ? "1.2em" : 0)
+          .attr("x", val)
+          .attr("text-anchor", anc)
+          .attr("class", "tspan" + i)
+      }
+    });
+
+  d3.select(el).selectAll(".node text")
+    .filter(function(d) { return !d.align_center; })
+    .text(d => d.name + " " + d.suffix)
+  }
+  '
+)
+```
